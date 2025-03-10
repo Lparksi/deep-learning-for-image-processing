@@ -1,16 +1,13 @@
 import json
 from collections import defaultdict
-
 import numpy as np
 import copy
 import torch
-import torch._six
+import six  # 直接导入 six，不使用 torch_six
 from pycocotools.cocoeval import COCOeval
 from pycocotools.coco import COCO
 import pycocotools.mask as mask_util
-
-from train_utils.distributed_utils import all_gather
-
+from .distributed_utils import all_gather
 
 class CocoEvaluator(object):
     def __init__(self, coco_gt, iou_types):
@@ -142,7 +139,7 @@ class CocoEvaluator(object):
                     {
                         "image_id": original_id,
                         "category_id": labels[k],
-                        'keypoints': keypoint,
+                        "keypoints": keypoint,
                         "score": scores[k],
                     }
                     for k, keypoint in enumerate(keypoints)
@@ -171,7 +168,6 @@ def merge(img_ids, eval_imgs):
     merged_img_ids = np.array(merged_img_ids)
     merged_eval_imgs = np.concatenate(merged_eval_imgs, 2)
 
-    # keep only unique (and in sorted order) images
     merged_img_ids, idx = np.unique(merged_img_ids, return_index=True)
     merged_eval_imgs = merged_eval_imgs[..., idx]
 
@@ -188,17 +184,7 @@ def create_common_coco_eval(coco_eval, img_ids, eval_imgs):
     coco_eval._paramsEval = copy.deepcopy(coco_eval.params)
 
 
-#################################################################
-# From pycocotools, just removed the prints and fixed
-# a Python3 bug about unicode not defined
-#################################################################
-
-# Ideally, pycocotools wouldn't have hard-coded prints
-# so that we could avoid copy-pasting those two functions
-
 def createIndex(self):
-    # create index
-    # print('creating index...')
     anns, cats, imgs = {}, {}, {}
     imgToAnns, catToImgs = defaultdict(list), defaultdict(list)
     if 'annotations' in self.dataset:
@@ -218,9 +204,6 @@ def createIndex(self):
         for ann in self.dataset['annotations']:
             catToImgs[ann['category_id']].append(ann['image_id'])
 
-    # print('index created!')
-
-    # create class members
     self.anns = anns
     self.imgToAnns = imgToAnns
     self.catToImgs = catToImgs
@@ -234,30 +217,33 @@ maskUtils = mask_util
 def loadRes(self, resFile):
     """
     Load result file and return a result api object.
-    :param   resFile (str)     : file name of result file
-    :return: res (obj)         : result api object
+    :param   resFile (str or list) : file name of result file or list of annotations
+    :return: res (obj)             : result api object
     """
     res = COCO()
     res.dataset['images'] = [img for img in self.dataset['images']]
 
-    # print('Loading and preparing results...')
-    # tic = time.time()
-    if isinstance(resFile, torch._six.string_classes):
-        anns = json.load(open(resFile))
-    elif type(resFile) == np.ndarray:
+    if isinstance(resFile, str):  # 直接使用 str 检查类型，兼容 Python 3
+        with open(resFile, 'r') as f:
+            anns = json.load(f)
+    elif isinstance(resFile, list):  # 如果是列表，直接使用
+        anns = resFile
+    elif isinstance(resFile, np.ndarray):  # 支持 NumPy 数组输入
         anns = self.loadNumpyAnnotations(resFile)
     else:
-        anns = resFile
-    assert type(anns) == list, 'results in not an array of objects'
+        raise ValueError(f"Unsupported resFile type: {type(resFile)}")
+
+    assert isinstance(anns, list), 'results is not an array of objects'
     annsImgIds = [ann['image_id'] for ann in anns]
     assert set(annsImgIds) == (set(annsImgIds) & set(self.getImgIds())), \
         'Results do not correspond to current coco set'
-    if 'caption' in anns[0]:
+
+    if anns and 'caption' in anns[0]:
         imgIds = set([img['id'] for img in res.dataset['images']]) & set([ann['image_id'] for ann in anns])
         res.dataset['images'] = [img for img in res.dataset['images'] if img['id'] in imgIds]
         for id, ann in enumerate(anns):
             ann['id'] = id + 1
-    elif 'bbox' in anns[0] and not anns[0]['bbox'] == []:
+    elif anns and 'bbox' in anns[0] and anns[0]['bbox']:
         res.dataset['categories'] = copy.deepcopy(self.dataset['categories'])
         for id, ann in enumerate(anns):
             bb = ann['bbox']
@@ -267,16 +253,15 @@ def loadRes(self, resFile):
             ann['area'] = bb[2] * bb[3]
             ann['id'] = id + 1
             ann['iscrowd'] = 0
-    elif 'segmentation' in anns[0]:
+    elif anns and 'segmentation' in anns[0]:
         res.dataset['categories'] = copy.deepcopy(self.dataset['categories'])
         for id, ann in enumerate(anns):
-            # now only support compressed RLE format as segmentation results
             ann['area'] = maskUtils.area(ann['segmentation'])
             if 'bbox' not in ann:
                 ann['bbox'] = maskUtils.toBbox(ann['segmentation'])
             ann['id'] = id + 1
             ann['iscrowd'] = 0
-    elif 'keypoints' in anns[0]:
+    elif anns and 'keypoints' in anns[0]:
         res.dataset['categories'] = copy.deepcopy(self.dataset['categories'])
         for id, ann in enumerate(anns):
             s = ann['keypoints']
@@ -286,7 +271,6 @@ def loadRes(self, resFile):
             ann['area'] = (x2 - x1) * (y2 - y1)
             ann['id'] = id + 1
             ann['bbox'] = [x1, y1, x2 - x1, y2 - y1]
-    # print('DONE (t={:0.2f}s)'.format(time.time()- tic))
 
     res.dataset['annotations'] = anns
     createIndex(res)
@@ -298,14 +282,10 @@ def evaluate(self):
     Run per image evaluation on given images and store results (a list of dict) in self.evalImgs
     :return: None
     '''
-    # tic = time.time()
-    # print('Running per image evaluation...')
     p = self.params
-    # add backward compatibility if useSegm is specified in params
     if p.useSegm is not None:
         p.iouType = 'segm' if p.useSegm == 1 else 'bbox'
         print('useSegm (deprecated) is not None. Running {} evaluation'.format(p.iouType))
-    # print('Evaluate annotation type *{}*'.format(p.iouType))
     p.imgIds = list(np.unique(p.imgIds))
     if p.useCats:
         p.catIds = list(np.unique(p.catIds))
@@ -313,17 +293,17 @@ def evaluate(self):
     self.params = p
 
     self._prepare()
-    # loop through images, area range, max detection number
     catIds = p.catIds if p.useCats else [-1]
 
-    if p.iouType == 'segm' or p.iouType == 'bbox':
+    if p.iouType in ('segm', 'bbox'):
         computeIoU = self.computeIoU
     elif p.iouType == 'keypoints':
         computeIoU = self.computeOks
     self.ious = {
         (imgId, catId): computeIoU(imgId, catId)
         for imgId in p.imgIds
-        for catId in catIds}
+        for catId in catIds
+    }
 
     evaluateImg = self.evaluateImg
     maxDet = p.maxDets[-1]
@@ -333,13 +313,6 @@ def evaluate(self):
         for areaRng in p.areaRng
         for imgId in p.imgIds
     ]
-    # this is NOT in the pycocotools code, but could be done outside
     evalImgs = np.asarray(evalImgs).reshape(len(catIds), len(p.areaRng), len(p.imgIds))
     self._paramsEval = copy.deepcopy(self.params)
-    # toc = time.time()
-    # print('DONE (t={:0.2f}s).'.format(toc-tic))
     return p.imgIds, evalImgs
-
-#################################################################
-# end of straight copy from pycocotools, just removing the prints
-#################################################################
